@@ -15,16 +15,17 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
 
 // DefaultUserAgent identifies the client to Deezer. A real, honest
 // User-Agent is both polite and the thing most likely to keep you unblocked.
-const DefaultUserAgent = "deezer-cli/dev (+https://github.com/tamnd/deezer-cli)"
+const DefaultUserAgent = "deezer-cli/0.1 (tamnd87@gmail.com)"
 
 // Host is the site this client talks to.
-const Host = "deezer.com"
+const Host = "api.deezer.com"
 
 // baseURL is the root every request is built from.
 const baseURL = "https://api.deezer.com"
@@ -32,8 +33,8 @@ const baseURL = "https://api.deezer.com"
 // defaultTimeout is the HTTP request timeout.
 const defaultTimeout = 15 * time.Second
 
-// defaultRate is the minimum gap between requests (~50 req/s).
-const defaultRate = 20 * time.Millisecond
+// defaultRate is the minimum gap between requests.
+const defaultRate = 200 * time.Millisecond
 
 // maxRetries is the number of retries on transient errors.
 const maxRetries = 3
@@ -139,101 +140,79 @@ func backoff(attempt int) time.Duration {
 	return d
 }
 
-// --- Public types ---
+// --- Public output types ---
 
 // Track is a Deezer track (song).
 type Track struct {
-	ID       int64  `json:"id"`
+	ID       int    `kit:"id" json:"id"`
 	Title    string `json:"title"`
 	Artist   string `json:"artist"`
-	Album    string `json:"album,omitempty"`
-	Duration int    `json:"duration_seconds,omitempty"`
-	Preview  string `json:"preview_url,omitempty"`
-	Rank     int    `json:"rank,omitempty"`
+	Album    string `json:"album"`
+	Duration int    `json:"duration_sec"`
+	Rank     int    `json:"rank"`
 }
 
 // Artist is a Deezer artist.
 type Artist struct {
-	ID         int64   `json:"id"`
-	Name       string  `json:"name"`
-	Albums     int     `json:"nb_albums,omitempty"`
-	Fans       int     `json:"nb_fans,omitempty"`
-	PictureURL string  `json:"picture_url,omitempty"`
-	TopTracks  []Track `json:"top_tracks,omitempty"`
+	ID     int    `kit:"id" json:"id"`
+	Name   string `json:"name"`
+	Albums int    `json:"albums"`
+	Fans   int    `json:"fans"`
+	URL    string `json:"url"`
 }
 
 // Album is a Deezer album.
 type Album struct {
-	ID          int64    `json:"id"`
-	Title       string   `json:"title"`
-	Artist      string   `json:"artist"`
-	Tracks      int      `json:"nb_tracks,omitempty"`
-	ReleaseDate string   `json:"release_date,omitempty"`
-	Genres      []string `json:"genres,omitempty"`
-	TrackList   []Track  `json:"track_list,omitempty"`
-	CoverURL    string   `json:"cover_url,omitempty"`
-}
-
-// ChartSection holds the current chart data.
-type ChartSection struct {
-	Tracks  []Track  `json:"tracks,omitempty"`
-	Albums  []Album  `json:"albums,omitempty"`
-	Artists []Artist `json:"artists,omitempty"`
+	ID       int    `kit:"id" json:"id"`
+	Title    string `json:"title"`
+	Artist   string `json:"artist"`
+	Tracks   int    `json:"tracks"`
+	Duration int    `json:"duration_sec"`
+	Released string `json:"released"`
+	Label    string `json:"label"`
+	Fans     int    `json:"fans"`
+	Genres   string `json:"genres"`
 }
 
 // --- Wire types (unexported) ---
 
 type wireTrack struct {
-	ID     int64  `json:"id"`
-	Title  string `json:"title"`
+	ID    int    `json:"id"`
+	Title string `json:"title"`
 	Artist struct {
 		Name string `json:"name"`
 	} `json:"artist"`
 	Album struct {
 		Title string `json:"title"`
 	} `json:"album"`
-	Duration int    `json:"duration"`
-	Preview  string `json:"preview"`
-	Rank     int    `json:"rank"`
+	Duration int `json:"duration"`
+	Rank     int `json:"rank"`
 }
 
 type wireArtist struct {
-	ID            int64  `json:"id"`
-	Name          string `json:"name"`
-	NbAlbum       int    `json:"nb_album"`
-	NbFan         int    `json:"nb_fan"`
-	PictureMedium string `json:"picture_medium"`
-	Tracklist     string `json:"tracklist"`
+	ID      int    `json:"id"`
+	Name    string `json:"name"`
+	NbAlbum int    `json:"nb_album"`
+	NbFan   int    `json:"nb_fan"`
+	Link    string `json:"link"`
 }
 
 type wireAlbum struct {
-	ID     int64  `json:"id"`
-	Title  string `json:"title"`
+	ID    int    `json:"id"`
+	Title string `json:"title"`
 	Artist struct {
 		Name string `json:"name"`
 	} `json:"artist"`
 	NbTracks    int    `json:"nb_tracks"`
+	Duration    int    `json:"duration"`
 	ReleaseDate string `json:"release_date"`
+	Label       string `json:"label"`
+	Fans        int    `json:"fans"`
 	Genres      struct {
 		Data []struct {
 			Name string `json:"name"`
 		} `json:"data"`
 	} `json:"genres"`
-	Tracks struct {
-		Data []wireTrack `json:"data"`
-	} `json:"tracks"`
-	CoverMedium string `json:"cover_medium"`
-}
-
-type wireListResp struct {
-	Data  []json.RawMessage `json:"data"`
-	Total int               `json:"total"`
-}
-
-type wireChartResp struct {
-	Tracks  struct{ Data []wireTrack  `json:"data"` } `json:"tracks"`
-	Albums  struct{ Data []wireAlbum  `json:"data"` } `json:"albums"`
-	Artists struct{ Data []wireArtist `json:"data"` } `json:"artists"`
 }
 
 // --- Conversion helpers ---
@@ -245,18 +224,17 @@ func toTrack(w wireTrack) Track {
 		Artist:   w.Artist.Name,
 		Album:    w.Album.Title,
 		Duration: w.Duration,
-		Preview:  w.Preview,
 		Rank:     w.Rank,
 	}
 }
 
 func toArtist(w wireArtist) Artist {
 	return Artist{
-		ID:         w.ID,
-		Name:       w.Name,
-		Albums:     w.NbAlbum,
-		Fans:       w.NbFan,
-		PictureURL: w.PictureMedium,
+		ID:     w.ID,
+		Name:   w.Name,
+		Albums: w.NbAlbum,
+		Fans:   w.NbFan,
+		URL:    w.Link,
 	}
 }
 
@@ -265,26 +243,23 @@ func toAlbum(w wireAlbum) Album {
 	for _, g := range w.Genres.Data {
 		genres = append(genres, g.Name)
 	}
-	tracks := make([]Track, 0, len(w.Tracks.Data))
-	for _, t := range w.Tracks.Data {
-		tracks = append(tracks, toTrack(t))
-	}
 	return Album{
-		ID:          w.ID,
-		Title:       w.Title,
-		Artist:      w.Artist.Name,
-		Tracks:      w.NbTracks,
-		ReleaseDate: w.ReleaseDate,
-		Genres:      genres,
-		TrackList:   tracks,
-		CoverURL:    w.CoverMedium,
+		ID:       w.ID,
+		Title:    w.Title,
+		Artist:   w.Artist.Name,
+		Tracks:   w.NbTracks,
+		Duration: w.Duration,
+		Released: w.ReleaseDate,
+		Label:    w.Label,
+		Fans:     w.Fans,
+		Genres:   strings.Join(genres, ", "),
 	}
 }
 
 // --- API methods ---
 
-// SearchTracks searches for tracks matching query.
-func (c *Client) SearchTracks(ctx context.Context, query string, limit int) ([]Track, error) {
+// Search searches for tracks matching query.
+func (c *Client) Search(ctx context.Context, query string, limit int) ([]Track, error) {
 	q := url.Values{"q": {query}, "limit": {strconv.Itoa(limit)}}
 	body, err := c.get(ctx, "/search", q)
 	if err != nil {
@@ -303,8 +278,8 @@ func (c *Client) SearchTracks(ctx context.Context, query string, limit int) ([]T
 	return out, nil
 }
 
-// GetArtist fetches artist info and their top tracks.
-func (c *Client) GetArtist(ctx context.Context, id int64) (*Artist, error) {
+// GetArtist fetches artist info by ID.
+func (c *Client) GetArtist(ctx context.Context, id int) (*Artist, error) {
 	body, err := c.get(ctx, fmt.Sprintf("/artist/%d", id), nil)
 	if err != nil {
 		return nil, err
@@ -314,98 +289,7 @@ func (c *Client) GetArtist(ctx context.Context, id int64) (*Artist, error) {
 		return nil, fmt.Errorf("decode artist: %w", err)
 	}
 	a := toArtist(wa)
-
-	// Fetch top tracks.
-	topBody, err := c.get(ctx, fmt.Sprintf("/artist/%d/top", id),
-		url.Values{"limit": {"10"}})
-	if err != nil {
-		return nil, err
-	}
-	var topResp struct {
-		Data []wireTrack `json:"data"`
-	}
-	if err := json.Unmarshal(topBody, &topResp); err != nil {
-		return nil, fmt.Errorf("decode artist top: %w", err)
-	}
-	a.TopTracks = make([]Track, len(topResp.Data))
-	for i, w := range topResp.Data {
-		a.TopTracks[i] = toTrack(w)
-	}
 	return &a, nil
-}
-
-// GetAlbum fetches album details with track list.
-func (c *Client) GetAlbum(ctx context.Context, id int64) (*Album, error) {
-	body, err := c.get(ctx, fmt.Sprintf("/album/%d", id), nil)
-	if err != nil {
-		return nil, err
-	}
-	var wa wireAlbum
-	if err := json.Unmarshal(body, &wa); err != nil {
-		return nil, fmt.Errorf("decode album: %w", err)
-	}
-	a := toAlbum(wa)
-	return &a, nil
-}
-
-// GetTrack fetches a single track by ID.
-func (c *Client) GetTrack(ctx context.Context, id int64) (*Track, error) {
-	body, err := c.get(ctx, fmt.Sprintf("/track/%d", id), nil)
-	if err != nil {
-		return nil, err
-	}
-	var wt wireTrack
-	if err := json.Unmarshal(body, &wt); err != nil {
-		return nil, fmt.Errorf("decode track: %w", err)
-	}
-	t := toTrack(wt)
-	return &t, nil
-}
-
-// GetChart fetches the current global chart.
-func (c *Client) GetChart(ctx context.Context) (*ChartSection, error) {
-	body, err := c.get(ctx, "/chart", nil)
-	if err != nil {
-		return nil, err
-	}
-	var wc wireChartResp
-	if err := json.Unmarshal(body, &wc); err != nil {
-		return nil, fmt.Errorf("decode chart: %w", err)
-	}
-	cs := &ChartSection{}
-	cs.Tracks = make([]Track, len(wc.Tracks.Data))
-	for i, w := range wc.Tracks.Data {
-		cs.Tracks[i] = toTrack(w)
-	}
-	cs.Albums = make([]Album, len(wc.Albums.Data))
-	for i, w := range wc.Albums.Data {
-		cs.Albums[i] = toAlbum(w)
-	}
-	cs.Artists = make([]Artist, len(wc.Artists.Data))
-	for i, w := range wc.Artists.Data {
-		cs.Artists[i] = toArtist(w)
-	}
-	return cs, nil
-}
-
-// SearchAlbums searches for albums matching query.
-func (c *Client) SearchAlbums(ctx context.Context, query string, limit int) ([]Album, error) {
-	q := url.Values{"q": {query}, "limit": {strconv.Itoa(limit)}}
-	body, err := c.get(ctx, "/search/album", q)
-	if err != nil {
-		return nil, err
-	}
-	var resp struct {
-		Data []wireAlbum `json:"data"`
-	}
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("decode search/album: %w", err)
-	}
-	out := make([]Album, len(resp.Data))
-	for i, w := range resp.Data {
-		out[i] = toAlbum(w)
-	}
-	return out, nil
 }
 
 // SearchArtists searches for artists matching query.
@@ -426,4 +310,32 @@ func (c *Client) SearchArtists(ctx context.Context, query string, limit int) ([]
 		out[i] = toArtist(w)
 	}
 	return out, nil
+}
+
+// GetAlbum fetches album details by ID.
+func (c *Client) GetAlbum(ctx context.Context, id int) (*Album, error) {
+	body, err := c.get(ctx, fmt.Sprintf("/album/%d", id), nil)
+	if err != nil {
+		return nil, err
+	}
+	var wa wireAlbum
+	if err := json.Unmarshal(body, &wa); err != nil {
+		return nil, fmt.Errorf("decode album: %w", err)
+	}
+	a := toAlbum(wa)
+	return &a, nil
+}
+
+// GetTrack fetches a single track by ID.
+func (c *Client) GetTrack(ctx context.Context, id int) (*Track, error) {
+	body, err := c.get(ctx, fmt.Sprintf("/track/%d", id), nil)
+	if err != nil {
+		return nil, err
+	}
+	var wt wireTrack
+	if err := json.Unmarshal(body, &wt); err != nil {
+		return nil, fmt.Errorf("decode track: %w", err)
+	}
+	t := toTrack(wt)
+	return &t, nil
 }

@@ -3,6 +3,8 @@ package deezer
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/tamnd/any-cli/kit"
 )
@@ -50,43 +52,36 @@ func (Domain) Register(app *kit.App) {
 		Name:    "search",
 		Group:   "tracks",
 		Summary: "Search for tracks by query",
-	}, searchTracks)
+		Args:    []kit.Arg{{Name: "query", Help: "search terms", Variadic: true}},
+	}, searchOp)
 
 	kit.Handle(app, kit.OpMeta{
 		Name:    "artist",
 		Group:   "library",
-		Summary: "Get artist info and top tracks",
-	}, getArtist)
+		Summary: "Get artist info by ID",
+		Args:    []kit.Arg{{Name: "id", Help: "artist ID"}},
+	}, artistOp)
+
+	kit.Handle(app, kit.OpMeta{
+		Name:    "artist-search",
+		Group:   "library",
+		Summary: "Search for artists by query",
+		Args:    []kit.Arg{{Name: "query", Help: "search terms", Variadic: true}},
+	}, artistSearchOp)
 
 	kit.Handle(app, kit.OpMeta{
 		Name:    "album",
 		Group:   "library",
-		Summary: "Get album details with track list",
-	}, getAlbum)
+		Summary: "Get album details by ID",
+		Args:    []kit.Arg{{Name: "id", Help: "album ID"}},
+	}, albumOp)
 
 	kit.Handle(app, kit.OpMeta{
 		Name:    "track",
 		Group:   "library",
 		Summary: "Get a single track by ID",
-	}, getTrack)
-
-	kit.Handle(app, kit.OpMeta{
-		Name:    "chart",
-		Group:   "charts",
-		Summary: "Get current top tracks, albums, and artists",
-	}, getChart)
-
-	kit.Handle(app, kit.OpMeta{
-		Name:    "search-albums",
-		Group:   "search",
-		Summary: "Search for albums by query",
-	}, searchAlbums)
-
-	kit.Handle(app, kit.OpMeta{
-		Name:    "search-artists",
-		Group:   "search",
-		Summary: "Search for artists by query",
-	}, searchArtists)
+		Args:    []kit.Arg{{Name: "id", Help: "track ID"}},
+	}, trackOp)
 }
 
 // newClient builds the client from the host-resolved config.
@@ -110,41 +105,43 @@ func newClient(_ context.Context, cfg kit.Config) (any, error) {
 // --- input structs ---
 
 type searchIn struct {
-	Query  string  `kit:"flag" short:"q" help:"search query (required)"`
-	Limit  int     `kit:"flag,inherit" help:"max results (default 10)"`
-	Client *Client `kit:"inject"`
+	Query  []string `kit:"arg,variadic" help:"search terms"`
+	Limit  int      `kit:"flag,inherit" help:"max results"`
+	Client *Client  `kit:"inject"`
 }
 
 type artistIn struct {
-	ID     int64   `kit:"flag" help:"artist ID"`
+	ID     string  `kit:"arg" help:"artist ID"`
 	Client *Client `kit:"inject"`
 }
 
+type artistSearchIn struct {
+	Query  []string `kit:"arg,variadic" help:"search terms"`
+	Limit  int      `kit:"flag,inherit" help:"max results"`
+	Client *Client  `kit:"inject"`
+}
+
 type albumIn struct {
-	ID     int64   `kit:"flag" help:"album ID"`
+	ID     string  `kit:"arg" help:"album ID"`
 	Client *Client `kit:"inject"`
 }
 
 type trackIn struct {
-	ID     int64   `kit:"flag" help:"track ID"`
-	Client *Client `kit:"inject"`
-}
-
-type chartIn struct {
+	ID     string  `kit:"arg" help:"track ID"`
 	Client *Client `kit:"inject"`
 }
 
 // --- handlers ---
 
-func searchTracks(ctx context.Context, in searchIn, emit func(*Track) error) error {
-	if in.Query == "" {
-		return fmt.Errorf("--query is required")
+func searchOp(ctx context.Context, in searchIn, emit func(*Track) error) error {
+	if len(in.Query) == 0 {
+		return fmt.Errorf("query is required")
 	}
 	limit := in.Limit
 	if limit <= 0 {
-		limit = 10
+		limit = 20
 	}
-	tracks, err := in.Client.SearchTracks(ctx, in.Query, limit)
+	tracks, err := in.Client.Search(ctx, strings.Join(in.Query, " "), limit)
 	if err != nil {
 		return err
 	}
@@ -156,76 +153,30 @@ func searchTracks(ctx context.Context, in searchIn, emit func(*Track) error) err
 	return nil
 }
 
-func getArtist(ctx context.Context, in artistIn, emit func(*Artist) error) error {
-	if in.ID == 0 {
-		return fmt.Errorf("--id is required")
+func artistOp(ctx context.Context, in artistIn, emit func(*Artist) error) error {
+	if in.ID == "" {
+		return fmt.Errorf("id is required")
 	}
-	a, err := in.Client.GetArtist(ctx, in.ID)
+	id, err := strconv.Atoi(in.ID)
+	if err != nil {
+		return fmt.Errorf("invalid id %q: %w", in.ID, err)
+	}
+	a, err := in.Client.GetArtist(ctx, id)
 	if err != nil {
 		return err
 	}
 	return emit(a)
 }
 
-func getAlbum(ctx context.Context, in albumIn, emit func(*Album) error) error {
-	if in.ID == 0 {
-		return fmt.Errorf("--id is required")
-	}
-	a, err := in.Client.GetAlbum(ctx, in.ID)
-	if err != nil {
-		return err
-	}
-	return emit(a)
-}
-
-func getTrack(ctx context.Context, in trackIn, emit func(*Track) error) error {
-	if in.ID == 0 {
-		return fmt.Errorf("--id is required")
-	}
-	t, err := in.Client.GetTrack(ctx, in.ID)
-	if err != nil {
-		return err
-	}
-	return emit(t)
-}
-
-func getChart(ctx context.Context, in chartIn, emit func(*ChartSection) error) error {
-	cs, err := in.Client.GetChart(ctx)
-	if err != nil {
-		return err
-	}
-	return emit(cs)
-}
-
-func searchAlbums(ctx context.Context, in searchIn, emit func(*Album) error) error {
-	if in.Query == "" {
-		return fmt.Errorf("--query is required")
+func artistSearchOp(ctx context.Context, in artistSearchIn, emit func(*Artist) error) error {
+	if len(in.Query) == 0 {
+		return fmt.Errorf("query is required")
 	}
 	limit := in.Limit
 	if limit <= 0 {
 		limit = 10
 	}
-	albums, err := in.Client.SearchAlbums(ctx, in.Query, limit)
-	if err != nil {
-		return err
-	}
-	for i := range albums {
-		if err := emit(&albums[i]); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func searchArtists(ctx context.Context, in searchIn, emit func(*Artist) error) error {
-	if in.Query == "" {
-		return fmt.Errorf("--query is required")
-	}
-	limit := in.Limit
-	if limit <= 0 {
-		limit = 10
-	}
-	artists, err := in.Client.SearchArtists(ctx, in.Query, limit)
+	artists, err := in.Client.SearchArtists(ctx, strings.Join(in.Query, " "), limit)
 	if err != nil {
 		return err
 	}
@@ -235,6 +186,36 @@ func searchArtists(ctx context.Context, in searchIn, emit func(*Artist) error) e
 		}
 	}
 	return nil
+}
+
+func albumOp(ctx context.Context, in albumIn, emit func(*Album) error) error {
+	if in.ID == "" {
+		return fmt.Errorf("id is required")
+	}
+	id, err := strconv.Atoi(in.ID)
+	if err != nil {
+		return fmt.Errorf("invalid id %q: %w", in.ID, err)
+	}
+	a, err := in.Client.GetAlbum(ctx, id)
+	if err != nil {
+		return err
+	}
+	return emit(a)
+}
+
+func trackOp(ctx context.Context, in trackIn, emit func(*Track) error) error {
+	if in.ID == "" {
+		return fmt.Errorf("id is required")
+	}
+	id, err := strconv.Atoi(in.ID)
+	if err != nil {
+		return fmt.Errorf("invalid id %q: %w", in.ID, err)
+	}
+	t, err := in.Client.GetTrack(ctx, id)
+	if err != nil {
+		return err
+	}
+	return emit(t)
 }
 
 // Classify and Locate satisfy the kit.Domain interface for URI routing.

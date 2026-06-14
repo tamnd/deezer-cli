@@ -25,7 +25,6 @@ func TestToTrack(t *testing.T) {
 		ID:       3135556,
 		Title:    "Harder, Better, Faster, Stronger",
 		Duration: 224,
-		Preview:  "https://cdn.deezer.com/preview/abc.mp3",
 		Rank:     999901,
 	}
 	w.Artist.Name = "Daft Punk"
@@ -47,9 +46,6 @@ func TestToTrack(t *testing.T) {
 	if got.Duration != 224 {
 		t.Errorf("Duration = %d, want 224", got.Duration)
 	}
-	if got.Preview != "https://cdn.deezer.com/preview/abc.mp3" {
-		t.Errorf("Preview = %q", got.Preview)
-	}
 	if got.Rank != 999901 {
 		t.Errorf("Rank = %d, want 999901", got.Rank)
 	}
@@ -57,11 +53,11 @@ func TestToTrack(t *testing.T) {
 
 func TestToArtist(t *testing.T) {
 	w := wireArtist{
-		ID:            27,
-		Name:          "Daft Punk",
-		NbAlbum:       31,
-		NbFan:         7019308,
-		PictureMedium: "https://e-cdns-images.dzcdn.net/artist/pic.jpg",
+		ID:      27,
+		Name:    "Daft Punk",
+		NbAlbum: 31,
+		NbFan:   7019308,
+		Link:    "https://www.deezer.com/artist/27",
 	}
 
 	got := toArtist(w)
@@ -77,8 +73,8 @@ func TestToArtist(t *testing.T) {
 	if got.Fans != 7019308 {
 		t.Errorf("Fans = %d, want 7019308", got.Fans)
 	}
-	if got.PictureURL != "https://e-cdns-images.dzcdn.net/artist/pic.jpg" {
-		t.Errorf("PictureURL = %q", got.PictureURL)
+	if got.URL != "https://www.deezer.com/artist/27" {
+		t.Errorf("URL = %q", got.URL)
 	}
 }
 
@@ -87,8 +83,10 @@ func TestToAlbum(t *testing.T) {
 		ID:          302127,
 		Title:       "Discovery",
 		NbTracks:    14,
+		Duration:    3600,
 		ReleaseDate: "2001-02-26",
-		CoverMedium: "https://e-cdns-images.dzcdn.net/cover/disc.jpg",
+		Label:       "Virgin",
+		Fans:        500000,
 	}
 	w.Artist.Name = "Daft Punk"
 	w.Genres.Data = []struct {
@@ -97,9 +95,6 @@ func TestToAlbum(t *testing.T) {
 		{Name: "Electronic"},
 		{Name: "Dance"},
 	}
-	wt := wireTrack{ID: 1, Title: "One More Time", Duration: 320}
-	wt.Artist.Name = "Daft Punk"
-	w.Tracks.Data = []wireTrack{wt}
 
 	got := toAlbum(w)
 	if got.ID != 302127 {
@@ -114,17 +109,20 @@ func TestToAlbum(t *testing.T) {
 	if got.Tracks != 14 {
 		t.Errorf("Tracks = %d, want 14", got.Tracks)
 	}
-	if got.ReleaseDate != "2001-02-26" {
-		t.Errorf("ReleaseDate = %q", got.ReleaseDate)
+	if got.Duration != 3600 {
+		t.Errorf("Duration = %d, want 3600", got.Duration)
 	}
-	if len(got.Genres) != 2 || got.Genres[0] != "Electronic" || got.Genres[1] != "Dance" {
-		t.Errorf("Genres = %v, want [Electronic Dance]", got.Genres)
+	if got.Released != "2001-02-26" {
+		t.Errorf("Released = %q", got.Released)
 	}
-	if len(got.TrackList) != 1 || got.TrackList[0].Title != "One More Time" {
-		t.Errorf("TrackList = %v", got.TrackList)
+	if got.Label != "Virgin" {
+		t.Errorf("Label = %q, want Virgin", got.Label)
 	}
-	if got.CoverURL != "https://e-cdns-images.dzcdn.net/cover/disc.jpg" {
-		t.Errorf("CoverURL = %q", got.CoverURL)
+	if got.Fans != 500000 {
+		t.Errorf("Fans = %d, want 500000", got.Fans)
+	}
+	if got.Genres != "Electronic, Dance" {
+		t.Errorf("Genres = %q, want \"Electronic, Dance\"", got.Genres)
 	}
 }
 
