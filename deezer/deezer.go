@@ -1,35 +1,44 @@
 // Package deezer is the library behind the deezer command line:
-// the HTTP client, request shaping, and the typed data models for deezer.
+// the HTTP client, request shaping, and the typed data models for the
+// Deezer public music API (https://api.deezer.com/).
 //
 // The Client here is the spine every command shares. It sets a real
 // User-Agent, paces requests so a busy session stays polite, and retries the
-// transient failures (429 and 5xx) that any public site throws under load.
-// Build your endpoint calls and JSON decoding on top of it.
+// transient failures (429 and 5xx) that any public API throws under load.
 package deezer
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
-	"strings"
+	"net/url"
+	"strconv"
+	"sync"
 	"time"
 )
 
-// DefaultUserAgent identifies the client to deezer. A real, honest
+// DefaultUserAgent identifies the client to Deezer. A real, honest
 // User-Agent is both polite and the thing most likely to keep you unblocked.
-const DefaultUserAgent = "deezer/dev (+https://github.com/tamnd/deezer-cli)"
+const DefaultUserAgent = "deezer-cli/dev (+https://github.com/tamnd/deezer-cli)"
 
-// Host is the site this client talks to, and the host the URI driver in
-// domain.go claims. The scaffold points it at deezer.com; change it once you
-// know the real endpoints you want to read.
+// Host is the site this client talks to.
 const Host = "deezer.com"
 
-// BaseURL is the root every request is built from.
-const BaseURL = "https://" + Host
+// baseURL is the root every request is built from.
+const baseURL = "https://api.deezer.com"
 
-// Client talks to deezer over HTTP.
+// defaultTimeout is the HTTP request timeout.
+const defaultTimeout = 15 * time.Second
+
+// defaultRate is the minimum gap between requests (~50 req/s).
+const defaultRate = 20 * time.Millisecond
+
+// maxRetries is the number of retries on transient errors.
+const maxRetries = 3
+
+// Client talks to the Deezer API over HTTP.
 type Client struct {
 	HTTP      *http.Client
 	UserAgent string
@@ -37,24 +46,28 @@ type Client struct {
 	Rate    time.Duration
 	Retries int
 
-	last time.Time
+	baseURL string
+	mu      sync.Mutex
+	last    time.Time
 }
 
-// NewClient returns a Client with sensible defaults: a 30s timeout, a 200ms
-// minimum gap between requests, and five retries on transient errors.
+// NewClient returns a Client with sensible defaults.
 func NewClient() *Client {
 	return &Client{
-		HTTP:      &http.Client{Timeout: 30 * time.Second},
+		HTTP:      &http.Client{Timeout: defaultTimeout},
 		UserAgent: DefaultUserAgent,
-		Rate:      200 * time.Millisecond,
-		Retries:   5,
+		Rate:      defaultRate,
+		Retries:   maxRetries,
+		baseURL:   baseURL,
 	}
 }
 
-// Get fetches url and returns the response body. It paces and retries according
-// to the client's settings. The caller owns nothing extra; the body is read
-// fully and closed here.
-func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
+// get fetches the given path with optional query parameters and returns the body bytes.
+func (c *Client) get(ctx context.Context, path string, q url.Values) ([]byte, error) {
+	u := c.baseURL + path
+	if len(q) > 0 {
+		u += "?" + q.Encode()
+	}
 	var lastErr error
 	for attempt := 0; attempt <= c.Retries; attempt++ {
 		if attempt > 0 {
@@ -64,7 +77,7 @@ func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
 			case <-time.After(backoff(attempt)):
 			}
 		}
-		body, retry, err := c.do(ctx, url)
+		body, retry, err := c.do(ctx, u)
 		if err == nil {
 			return body, nil
 		}
@@ -73,16 +86,17 @@ func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
 			return nil, err
 		}
 	}
-	return nil, fmt.Errorf("get %s: %w", url, lastErr)
+	return nil, fmt.Errorf("get %s: %w", path, lastErr)
 }
 
-func (c *Client) do(ctx context.Context, url string) (body []byte, retry bool, err error) {
+func (c *Client) do(ctx context.Context, rawURL string) (body []byte, retry bool, err error) {
 	c.pace()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, false, err
 	}
 	req.Header.Set("User-Agent", c.UserAgent)
+	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
@@ -109,6 +123,8 @@ func (c *Client) pace() {
 	if c.Rate <= 0 {
 		return
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if wait := c.Rate - time.Since(c.last); wait > 0 {
 		time.Sleep(wait)
 	}
@@ -123,78 +139,291 @@ func backoff(attempt int) time.Duration {
 	return d
 }
 
-// Page is the scaffold's one example record: a single page, addressed by the
-// path that names it on deezer.com. It is a stand-in for the typed records you
-// will model from the real deezer endpoints. The kit struct tags make it
-// addressable as a resource URI (see domain.go): ID is the URI id, and Body is
-// the long text `deezer cat` and the Markdown export print.
-type Page struct {
-	ID    string `json:"id" kit:"id"`
-	URL   string `json:"url"`
-	Title string `json:"title,omitempty"`
-	Body  string `json:"body,omitempty" kit:"body"`
+// --- Public types ---
+
+// Track is a Deezer track (song).
+type Track struct {
+	ID       int64  `json:"id"`
+	Title    string `json:"title"`
+	Artist   string `json:"artist"`
+	Album    string `json:"album,omitempty"`
+	Duration int    `json:"duration_seconds,omitempty"`
+	Preview  string `json:"preview_url,omitempty"`
+	Rank     int    `json:"rank,omitempty"`
 }
 
-// GetPage fetches one page by its path (for example "wiki/Go") and returns it as
-// a record. The scaffold keeps a plain-text preview of the response as the body;
-// replace the parsing with the real fields once you know the endpoint's shape.
-func (c *Client) GetPage(ctx context.Context, path string) (*Page, error) {
-	path = strings.Trim(path, "/")
-	url := BaseURL + "/" + path
-	body, err := c.Get(ctx, url)
+// Artist is a Deezer artist.
+type Artist struct {
+	ID         int64   `json:"id"`
+	Name       string  `json:"name"`
+	Albums     int     `json:"nb_albums,omitempty"`
+	Fans       int     `json:"nb_fans,omitempty"`
+	PictureURL string  `json:"picture_url,omitempty"`
+	TopTracks  []Track `json:"top_tracks,omitempty"`
+}
+
+// Album is a Deezer album.
+type Album struct {
+	ID          int64    `json:"id"`
+	Title       string   `json:"title"`
+	Artist      string   `json:"artist"`
+	Tracks      int      `json:"nb_tracks,omitempty"`
+	ReleaseDate string   `json:"release_date,omitempty"`
+	Genres      []string `json:"genres,omitempty"`
+	TrackList   []Track  `json:"track_list,omitempty"`
+	CoverURL    string   `json:"cover_url,omitempty"`
+}
+
+// ChartSection holds the current chart data.
+type ChartSection struct {
+	Tracks  []Track  `json:"tracks,omitempty"`
+	Albums  []Album  `json:"albums,omitempty"`
+	Artists []Artist `json:"artists,omitempty"`
+}
+
+// --- Wire types (unexported) ---
+
+type wireTrack struct {
+	ID     int64  `json:"id"`
+	Title  string `json:"title"`
+	Artist struct {
+		Name string `json:"name"`
+	} `json:"artist"`
+	Album struct {
+		Title string `json:"title"`
+	} `json:"album"`
+	Duration int    `json:"duration"`
+	Preview  string `json:"preview"`
+	Rank     int    `json:"rank"`
+}
+
+type wireArtist struct {
+	ID            int64  `json:"id"`
+	Name          string `json:"name"`
+	NbAlbum       int    `json:"nb_album"`
+	NbFan         int    `json:"nb_fan"`
+	PictureMedium string `json:"picture_medium"`
+	Tracklist     string `json:"tracklist"`
+}
+
+type wireAlbum struct {
+	ID     int64  `json:"id"`
+	Title  string `json:"title"`
+	Artist struct {
+		Name string `json:"name"`
+	} `json:"artist"`
+	NbTracks    int    `json:"nb_tracks"`
+	ReleaseDate string `json:"release_date"`
+	Genres      struct {
+		Data []struct {
+			Name string `json:"name"`
+		} `json:"data"`
+	} `json:"genres"`
+	Tracks struct {
+		Data []wireTrack `json:"data"`
+	} `json:"tracks"`
+	CoverMedium string `json:"cover_medium"`
+}
+
+type wireListResp struct {
+	Data  []json.RawMessage `json:"data"`
+	Total int               `json:"total"`
+}
+
+type wireChartResp struct {
+	Tracks  struct{ Data []wireTrack  `json:"data"` } `json:"tracks"`
+	Albums  struct{ Data []wireAlbum  `json:"data"` } `json:"albums"`
+	Artists struct{ Data []wireArtist `json:"data"` } `json:"artists"`
+}
+
+// --- Conversion helpers ---
+
+func toTrack(w wireTrack) Track {
+	return Track{
+		ID:       w.ID,
+		Title:    w.Title,
+		Artist:   w.Artist.Name,
+		Album:    w.Album.Title,
+		Duration: w.Duration,
+		Preview:  w.Preview,
+		Rank:     w.Rank,
+	}
+}
+
+func toArtist(w wireArtist) Artist {
+	return Artist{
+		ID:         w.ID,
+		Name:       w.Name,
+		Albums:     w.NbAlbum,
+		Fans:       w.NbFan,
+		PictureURL: w.PictureMedium,
+	}
+}
+
+func toAlbum(w wireAlbum) Album {
+	genres := make([]string, 0, len(w.Genres.Data))
+	for _, g := range w.Genres.Data {
+		genres = append(genres, g.Name)
+	}
+	tracks := make([]Track, 0, len(w.Tracks.Data))
+	for _, t := range w.Tracks.Data {
+		tracks = append(tracks, toTrack(t))
+	}
+	return Album{
+		ID:          w.ID,
+		Title:       w.Title,
+		Artist:      w.Artist.Name,
+		Tracks:      w.NbTracks,
+		ReleaseDate: w.ReleaseDate,
+		Genres:      genres,
+		TrackList:   tracks,
+		CoverURL:    w.CoverMedium,
+	}
+}
+
+// --- API methods ---
+
+// SearchTracks searches for tracks matching query.
+func (c *Client) SearchTracks(ctx context.Context, query string, limit int) ([]Track, error) {
+	q := url.Values{"q": {query}, "limit": {strconv.Itoa(limit)}}
+	body, err := c.get(ctx, "/search", q)
 	if err != nil {
 		return nil, err
 	}
-	return &Page{ID: path, URL: url, Title: path, Body: pageText(body)}, nil
-}
-
-// PageLinks fetches a page and returns the same-host pages it links to, as page
-// stubs. It shows the member-listing pattern the URI driver relies on: every
-// stub carries enough (an id and a URL) to be addressed and followed on its own.
-func (c *Client) PageLinks(ctx context.Context, path string, limit int) ([]*Page, error) {
-	path = strings.Trim(path, "/")
-	body, err := c.Get(ctx, BaseURL+"/"+path)
-	if err != nil {
-		return nil, err
+	var resp struct {
+		Data []wireTrack `json:"data"`
 	}
-	var out []*Page
-	seen := map[string]bool{}
-	for _, p := range linkPaths(body) {
-		if seen[p] {
-			continue
-		}
-		seen[p] = true
-		out = append(out, &Page{ID: p, URL: BaseURL + "/" + p})
-		if limit > 0 && len(out) >= limit {
-			break
-		}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("decode search: %w", err)
+	}
+	out := make([]Track, len(resp.Data))
+	for i, w := range resp.Data {
+		out[i] = toTrack(w)
 	}
 	return out, nil
 }
 
-var (
-	hrefRE = regexp.MustCompile(`href="(/[^":#?]+)"`)
-	tagRE  = regexp.MustCompile(`<[^>]+>`)
-)
-
-// linkPaths pulls the relative link targets out of an HTML response, so a list
-// op can turn each into an addressable page stub.
-func linkPaths(body []byte) []string {
-	var out []string
-	for _, m := range hrefRE.FindAllSubmatch(body, -1) {
-		if p := strings.Trim(string(m[1]), "/"); p != "" {
-			out = append(out, p)
-		}
+// GetArtist fetches artist info and their top tracks.
+func (c *Client) GetArtist(ctx context.Context, id int64) (*Artist, error) {
+	body, err := c.get(ctx, fmt.Sprintf("/artist/%d", id), nil)
+	if err != nil {
+		return nil, err
 	}
-	return out
+	var wa wireArtist
+	if err := json.Unmarshal(body, &wa); err != nil {
+		return nil, fmt.Errorf("decode artist: %w", err)
+	}
+	a := toArtist(wa)
+
+	// Fetch top tracks.
+	topBody, err := c.get(ctx, fmt.Sprintf("/artist/%d/top", id),
+		url.Values{"limit": {"10"}})
+	if err != nil {
+		return nil, err
+	}
+	var topResp struct {
+		Data []wireTrack `json:"data"`
+	}
+	if err := json.Unmarshal(topBody, &topResp); err != nil {
+		return nil, fmt.Errorf("decode artist top: %w", err)
+	}
+	a.TopTracks = make([]Track, len(topResp.Data))
+	for i, w := range topResp.Data {
+		a.TopTracks[i] = toTrack(w)
+	}
+	return &a, nil
 }
 
-// pageText reduces an HTML response to a short plain-text preview, a stand-in
-// for the typed extract a real endpoint would hand you.
-func pageText(body []byte) string {
-	s := strings.Join(strings.Fields(tagRE.ReplaceAllString(string(body), " ")), " ")
-	if len(s) > 500 {
-		s = s[:500]
+// GetAlbum fetches album details with track list.
+func (c *Client) GetAlbum(ctx context.Context, id int64) (*Album, error) {
+	body, err := c.get(ctx, fmt.Sprintf("/album/%d", id), nil)
+	if err != nil {
+		return nil, err
 	}
-	return s
+	var wa wireAlbum
+	if err := json.Unmarshal(body, &wa); err != nil {
+		return nil, fmt.Errorf("decode album: %w", err)
+	}
+	a := toAlbum(wa)
+	return &a, nil
+}
+
+// GetTrack fetches a single track by ID.
+func (c *Client) GetTrack(ctx context.Context, id int64) (*Track, error) {
+	body, err := c.get(ctx, fmt.Sprintf("/track/%d", id), nil)
+	if err != nil {
+		return nil, err
+	}
+	var wt wireTrack
+	if err := json.Unmarshal(body, &wt); err != nil {
+		return nil, fmt.Errorf("decode track: %w", err)
+	}
+	t := toTrack(wt)
+	return &t, nil
+}
+
+// GetChart fetches the current global chart.
+func (c *Client) GetChart(ctx context.Context) (*ChartSection, error) {
+	body, err := c.get(ctx, "/chart", nil)
+	if err != nil {
+		return nil, err
+	}
+	var wc wireChartResp
+	if err := json.Unmarshal(body, &wc); err != nil {
+		return nil, fmt.Errorf("decode chart: %w", err)
+	}
+	cs := &ChartSection{}
+	cs.Tracks = make([]Track, len(wc.Tracks.Data))
+	for i, w := range wc.Tracks.Data {
+		cs.Tracks[i] = toTrack(w)
+	}
+	cs.Albums = make([]Album, len(wc.Albums.Data))
+	for i, w := range wc.Albums.Data {
+		cs.Albums[i] = toAlbum(w)
+	}
+	cs.Artists = make([]Artist, len(wc.Artists.Data))
+	for i, w := range wc.Artists.Data {
+		cs.Artists[i] = toArtist(w)
+	}
+	return cs, nil
+}
+
+// SearchAlbums searches for albums matching query.
+func (c *Client) SearchAlbums(ctx context.Context, query string, limit int) ([]Album, error) {
+	q := url.Values{"q": {query}, "limit": {strconv.Itoa(limit)}}
+	body, err := c.get(ctx, "/search/album", q)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Data []wireAlbum `json:"data"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("decode search/album: %w", err)
+	}
+	out := make([]Album, len(resp.Data))
+	for i, w := range resp.Data {
+		out[i] = toAlbum(w)
+	}
+	return out, nil
+}
+
+// SearchArtists searches for artists matching query.
+func (c *Client) SearchArtists(ctx context.Context, query string, limit int) ([]Artist, error) {
+	q := url.Values{"q": {query}, "limit": {strconv.Itoa(limit)}}
+	body, err := c.get(ctx, "/search/artist", q)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Data []wireArtist `json:"data"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("decode search/artist: %w", err)
+	}
+	out := make([]Artist, len(resp.Data))
+	for i, w := range resp.Data {
+		out[i] = toArtist(w)
+	}
+	return out, nil
 }

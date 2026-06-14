@@ -2,13 +2,10 @@ package deezer
 
 import (
 	"testing"
-
-	"github.com/tamnd/any-cli/kit"
 )
 
-// These tests are offline: they exercise the URI driver's pure string functions
-// and the host wiring (mint, body, resolve), which need no network. The client's
-// HTTP behaviour is covered in deezer_test.go.
+// These tests exercise the conversion helpers and the URI driver's pure string
+// functions, which need no network. HTTP behaviour is covered in deezer_test.go.
 
 func TestDomainInfo(t *testing.T) {
 	info := Domain{}.Info()
@@ -23,54 +20,139 @@ func TestDomainInfo(t *testing.T) {
 	}
 }
 
-func TestClassify(t *testing.T) {
-	cases := []struct{ in, typ, id string }{
-		{"wiki/Go", "page", "wiki/Go"},
-		{"/about/", "page", "about"},
-		{"https://" + Host + "/team/contact", "page", "team/contact"},
+func TestToTrack(t *testing.T) {
+	w := wireTrack{
+		ID:       3135556,
+		Title:    "Harder, Better, Faster, Stronger",
+		Duration: 224,
+		Preview:  "https://cdn.deezer.com/preview/abc.mp3",
+		Rank:     999901,
 	}
-	for _, tc := range cases {
-		typ, id, err := Domain{}.Classify(tc.in)
-		if err != nil || typ != tc.typ || id != tc.id {
-			t.Errorf("Classify(%q) = (%q, %q, %v), want (%q, %q, nil)",
-				tc.in, typ, id, err, tc.typ, tc.id)
-		}
+	w.Artist.Name = "Daft Punk"
+	w.Album.Title = "Discovery"
+
+	got := toTrack(w)
+	if got.ID != 3135556 {
+		t.Errorf("ID = %d, want 3135556", got.ID)
+	}
+	if got.Title != "Harder, Better, Faster, Stronger" {
+		t.Errorf("Title = %q", got.Title)
+	}
+	if got.Artist != "Daft Punk" {
+		t.Errorf("Artist = %q, want Daft Punk", got.Artist)
+	}
+	if got.Album != "Discovery" {
+		t.Errorf("Album = %q, want Discovery", got.Album)
+	}
+	if got.Duration != 224 {
+		t.Errorf("Duration = %d, want 224", got.Duration)
+	}
+	if got.Preview != "https://cdn.deezer.com/preview/abc.mp3" {
+		t.Errorf("Preview = %q", got.Preview)
+	}
+	if got.Rank != 999901 {
+		t.Errorf("Rank = %d, want 999901", got.Rank)
+	}
+}
+
+func TestToArtist(t *testing.T) {
+	w := wireArtist{
+		ID:            27,
+		Name:          "Daft Punk",
+		NbAlbum:       31,
+		NbFan:         7019308,
+		PictureMedium: "https://e-cdns-images.dzcdn.net/artist/pic.jpg",
+	}
+
+	got := toArtist(w)
+	if got.ID != 27 {
+		t.Errorf("ID = %d, want 27", got.ID)
+	}
+	if got.Name != "Daft Punk" {
+		t.Errorf("Name = %q, want Daft Punk", got.Name)
+	}
+	if got.Albums != 31 {
+		t.Errorf("Albums = %d, want 31", got.Albums)
+	}
+	if got.Fans != 7019308 {
+		t.Errorf("Fans = %d, want 7019308", got.Fans)
+	}
+	if got.PictureURL != "https://e-cdns-images.dzcdn.net/artist/pic.jpg" {
+		t.Errorf("PictureURL = %q", got.PictureURL)
+	}
+}
+
+func TestToAlbum(t *testing.T) {
+	w := wireAlbum{
+		ID:          302127,
+		Title:       "Discovery",
+		NbTracks:    14,
+		ReleaseDate: "2001-02-26",
+		CoverMedium: "https://e-cdns-images.dzcdn.net/cover/disc.jpg",
+	}
+	w.Artist.Name = "Daft Punk"
+	w.Genres.Data = []struct {
+		Name string `json:"name"`
+	}{
+		{Name: "Electronic"},
+		{Name: "Dance"},
+	}
+	wt := wireTrack{ID: 1, Title: "One More Time", Duration: 320}
+	wt.Artist.Name = "Daft Punk"
+	w.Tracks.Data = []wireTrack{wt}
+
+	got := toAlbum(w)
+	if got.ID != 302127 {
+		t.Errorf("ID = %d, want 302127", got.ID)
+	}
+	if got.Title != "Discovery" {
+		t.Errorf("Title = %q, want Discovery", got.Title)
+	}
+	if got.Artist != "Daft Punk" {
+		t.Errorf("Artist = %q, want Daft Punk", got.Artist)
+	}
+	if got.Tracks != 14 {
+		t.Errorf("Tracks = %d, want 14", got.Tracks)
+	}
+	if got.ReleaseDate != "2001-02-26" {
+		t.Errorf("ReleaseDate = %q", got.ReleaseDate)
+	}
+	if len(got.Genres) != 2 || got.Genres[0] != "Electronic" || got.Genres[1] != "Dance" {
+		t.Errorf("Genres = %v, want [Electronic Dance]", got.Genres)
+	}
+	if len(got.TrackList) != 1 || got.TrackList[0].Title != "One More Time" {
+		t.Errorf("TrackList = %v", got.TrackList)
+	}
+	if got.CoverURL != "https://e-cdns-images.dzcdn.net/cover/disc.jpg" {
+		t.Errorf("CoverURL = %q", got.CoverURL)
 	}
 }
 
 func TestLocate(t *testing.T) {
-	got, err := Domain{}.Locate("page", "wiki/Go")
-	want := "https://" + Host + "/wiki/Go"
-	if err != nil || got != want {
-		t.Errorf("Locate = (%q, %v), want (%q, nil)", got, err, want)
+	cases := []struct {
+		uriType string
+		id      string
+		want    string
+	}{
+		{"track", "3135556", baseURL + "/track/3135556"},
+		{"artist", "27", baseURL + "/artist/27"},
+		{"album", "302127", baseURL + "/album/302127"},
+	}
+	for _, tc := range cases {
+		got, err := Domain{}.Locate(tc.uriType, tc.id)
+		if err != nil {
+			t.Errorf("Locate(%q, %q) error: %v", tc.uriType, tc.id, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("Locate(%q, %q) = %q, want %q", tc.uriType, tc.id, got, tc.want)
+		}
 	}
 }
 
-// TestHostWiring mounts the driver in a kit Host (the runtime ant drives) and
-// checks the round trip: a record mints to its URI, its body is readable, and a
-// bare id resolves back to the same URI. The init in domain.go registers the
-// domain, so kit.Open finds it.
-func TestHostWiring(t *testing.T) {
-	h, err := kit.Open()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	p := &Page{ID: "wiki/Go", URL: "https://" + Host + "/wiki/Go", Title: "Go", Body: "Go is a language."}
-	u, err := h.Mint(p)
-	if err != nil {
-		t.Fatalf("Mint: %v", err)
-	}
-	if want := "deezer://page/wiki/Go"; u.String() != want {
-		t.Errorf("Mint = %q, want %q", u.String(), want)
-	}
-
-	if body, ok := h.Body(p); !ok || body == "" {
-		t.Errorf("Body = (%q, %v), want non-empty", body, ok)
-	}
-
-	got, err := h.ResolveOn("deezer", "about")
-	if err != nil || got.String() != "deezer://page/about" {
-		t.Errorf("ResolveOn = (%q, %v), want deezer://page/about", got.String(), err)
+func TestLocateUnknownType(t *testing.T) {
+	_, err := Domain{}.Locate("playlist", "123")
+	if err == nil {
+		t.Error("expected error for unknown type, got nil")
 	}
 }
